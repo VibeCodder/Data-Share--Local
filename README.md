@@ -1,4 +1,4 @@
-# File Share
+# File Server
 A simple script that enables to share files between devices in the same network.
 
 You must also install:
