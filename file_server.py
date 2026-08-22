@@ -6,7 +6,7 @@ Default port: 8000
 Files and pasted text land in the ./uploads folder
 """
 
-import os
+import os,socket,webbrowser
 import sys
 import cgi
 import html
@@ -15,9 +15,26 @@ import datetime
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-UPLOAD_DIR = "uploads"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+def get_active_ip():
+    # Creating a UDP socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # Connecting to a public IP forces the system to select the correct output card
+        # The package is not physically sent
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+    except Exception:
+        ip = "127.0.0.1"
+    finally:
+        s.close()
+    return ip
+
+UPLOAD_DIR = "uploads"
+if not os.path.isdir(f"{UPLOAD_DIR}"):
+  os.makedirs(UPLOAD_DIR, exist_ok=True)
+else:
+    pass
 FORM_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -145,6 +162,70 @@ FORM_HTML = """<!DOCTYPE html>
     font-size: 12px;
     color: var(--amber);
     min-height: 16px;
+  }
+
+  .progress-wrap {
+    margin-top: 14px;
+    display: none;
+  }
+
+  .progress-wrap.active {
+    display: block;
+  }
+
+  .progress-item {
+    margin-bottom: 10px;
+  }
+
+  .progress-item:last-child {
+    margin-bottom: 0;
+  }
+
+  .progress-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 5px;
+    gap: 10px;
+  }
+
+  .progress-label .pname {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .progress-label .ppct {
+    color: var(--amber);
+    flex-shrink: 0;
+  }
+
+  .progress-track {
+    width: 100%;
+    height: 6px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+
+  .progress-fill {
+    height: 100%;
+    width: 0%;
+    background: var(--amber);
+    box-shadow: 0 0 6px var(--amber-glow);
+    transition: width 0.1s linear;
+  }
+
+  .progress-fill.done {
+    background: #6fae7c;
+  }
+
+  .progress-fill.error {
+    background: #c05656;
   }
 
   textarea {
@@ -284,11 +365,12 @@ FORM_HTML = """<!DOCTYPE html>
     <div class="label">01 / file</div>
     <form method="POST" enctype="multipart/form-data" action="/" id="fileForm">
       <label class="drop" id="dropZone">
-        <input type="file" name="file" id="fileInput">
+        <input type="file" name="file" id="fileInput" multiple>
         <span id="dropText">drag a file here or click to browse</span>
         <div class="filename" id="fileName"></div>
       </label>
-      <button type="submit">send file</button>
+      <button type="submit" id="fileSubmit">send file</button>
+      <div class="progress-wrap" id="progressWrap"></div>
     </form>
   </div>
 
@@ -318,11 +400,20 @@ __FILE_LIST__
   const fileInput = document.getElementById('fileInput');
   const fileName = document.getElementById('fileName');
   const dropText = document.getElementById('dropText');
+  const fileForm = document.getElementById('fileForm');
+  const fileSubmit = document.getElementById('fileSubmit');
+  const progressWrap = document.getElementById('progressWrap');
+
+  function describeSelection(files) {
+    if (!files.length) return '';
+    if (files.length === 1) return files[0].name;
+    return `${files.length} files selected`;
+  }
 
   fileInput.addEventListener('change', () => {
     if (fileInput.files.length) {
-      fileName.textContent = fileInput.files[0].name;
-      dropText.textContent = 'selected file:';
+      fileName.textContent = describeSelection(fileInput.files);
+      dropText.textContent = 'selected:';
     }
   });
 
@@ -343,9 +434,74 @@ __FILE_LIST__
   dropZone.addEventListener('drop', e => {
     if (e.dataTransfer.files.length) {
       fileInput.files = e.dataTransfer.files;
-      fileName.textContent = e.dataTransfer.files[0].name;
-      dropText.textContent = 'selected file:';
+      fileName.textContent = describeSelection(e.dataTransfer.files);
+      dropText.textContent = 'selected:';
     }
+  });
+
+  function uploadOne(file) {
+    return new Promise((resolve, reject) => {
+      const row = document.createElement('div');
+      row.className = 'progress-item';
+      row.innerHTML = `
+        <div class="progress-label">
+          <span class="pname"></span>
+          <span class="ppct">0%</span>
+        </div>
+        <div class="progress-track"><div class="progress-fill"></div></div>
+      `;
+      row.querySelector('.pname').textContent = file.name;
+      progressWrap.appendChild(row);
+
+      const pct = row.querySelector('.ppct');
+      const fill = row.querySelector('.progress-fill');
+
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/', true);
+
+      xhr.upload.addEventListener('progress', e => {
+        if (e.lengthComputable) {
+          const p = Math.round((e.loaded / e.total) * 100);
+          fill.style.width = p + '%';
+          pct.textContent = p + '%';
+        }
+      });
+
+      xhr.addEventListener('load', () => {
+        fill.style.width = '100%';
+        fill.classList.add('done');
+        pct.textContent = 'done';
+        resolve();
+      });
+
+      xhr.addEventListener('error', () => {
+        fill.classList.add('error');
+        pct.textContent = 'error';
+        reject(new Error('upload failed'));
+      });
+
+      const fd = new FormData();
+      fd.append('file', file);
+      xhr.send(fd);
+    });
+  }
+
+  fileForm.addEventListener('submit', e => {
+    e.preventDefault();
+    const files = Array.from(fileInput.files || []);
+    if (!files.length) return;
+
+    fileSubmit.disabled = true;
+    fileSubmit.textContent = 'sending...';
+    progressWrap.innerHTML = '';
+    progressWrap.classList.add('active');
+
+    // upload sequentially so each bar fills in order
+    files.reduce((chain, file) => {
+      return chain.then(() => uploadOne(file).catch(() => {}));
+    }, Promise.resolve()).then(() => {
+      setTimeout(() => window.location.reload(), 400);
+    });
   });
 </script>
 </body>
@@ -477,9 +633,11 @@ if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"Server running on port {port}. Files land in the '{UPLOAD_DIR}/' folder.")
-    print(f"On the local network, access it via: http://YOUR_LOCAL_IP:{port}")
+    print(f"On the local network, access it via: http://{get_active_ip()}:{port}")
+    webbrowser.open_new_tab(f"http://{get_active_ip()}:{port}")
     try:
         server.serve_forever()
+        
     except KeyboardInterrupt:
         print("\nStopping server.")
         server.server_close()
