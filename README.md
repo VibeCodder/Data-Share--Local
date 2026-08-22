@@ -1,5 +1,6 @@
 # File Server
-A simple script that enables to share files between devices in the same network.
+A simple script that enables to share files between devices in the same network.<br>
+Program can also give an option to sent only text and on the file list there is a preview of this text in txt file.
 
 You must also install:
 
@@ -7,4 +8,6 @@ You must also install:
 pip install tkinterdnd2
 ```
 
-<img width="1920" height="1020" alt="image" src="https://github.com/user-attachments/assets/0b71f6dd-309a-471d-958d-609092a25552" />
+<img width="1920" height="1020" alt="image" src="https://github.com/user-attachments/assets/cea2ce51-3ed3-432c-a16a-fe497ec792c3" />
+
+<img width="1920" height="1020" alt="image" src="https://github.com/user-attachments/assets/6f15a1d1-bbcf-48b6-9c92-36d88d15c862" />
