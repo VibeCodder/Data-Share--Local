@@ -31,10 +31,15 @@ def get_active_ip():
     return ip
 
 UPLOAD_DIR = "uploads"
-if not os.path.isdir(f"{UPLOAD_DIR}"):
-  os.makedirs(UPLOAD_DIR, exist_ok=True)
-else:
-    pass
+
+
+def ensure_upload_dir():
+    """(Re)creates the uploads folder if it's missing, e.g. deleted while the server is running."""
+    if not os.path.isdir(UPLOAD_DIR):
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+ensure_upload_dir()
 FORM_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -54,6 +59,42 @@ FORM_HTML = """<!DOCTYPE html>
   }
 
   * { box-sizing: border-box; }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: var(--bg);
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 3px;
+    border: 2px solid var(--bg);
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--amber-dim);
+  }
+
+  ::-webkit-scrollbar-corner {
+    background: var(--bg);
+  }
+
+  ::-webkit-resizer {
+    background-color: var(--bg);
+    background-image:
+      linear-gradient(135deg, transparent 0 40%, var(--border) 40% 55%, transparent 55% 100%),
+      linear-gradient(135deg, transparent 0 65%, var(--border) 65% 80%, transparent 80% 100%);
+    border: none;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) var(--bg);
+  }
 
   body {
     background: var(--bg);
@@ -290,17 +331,27 @@ FORM_HTML = """<!DOCTYPE html>
   }
 
   .filelist li {
+    list-style: none;
+  }
+
+  .file-row {
     display: flex;
-    justify-content: space-between;
-    align-items: center;
+    flex-direction: column;
     padding: 9px 0;
     border-bottom: 1px solid var(--border);
     font-size: 13px;
-    gap: 12px;
+    gap: 10px;
   }
 
-  .filelist li:last-child {
+  .file-row:last-child {
     border-bottom: none;
+  }
+
+  .file-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
   }
 
   .fname {
@@ -346,6 +397,79 @@ FORM_HTML = """<!DOCTYPE html>
     border-color: var(--amber);
   }
 
+  .preview-btn {
+    margin-top: 0;
+    width: auto;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    font-family: inherit;
+    font-size: 11px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    padding: 4px 10px;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+    white-space: nowrap;
+  }
+
+  .preview-btn:hover {
+    color: var(--text);
+    border-color: var(--amber-dim);
+  }
+
+  .preview-wrap {
+    display: none;
+  }
+
+  .preview-wrap.open {
+    display: block;
+  }
+
+  .preview-area {
+    width: 100%;
+    min-height: 90px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 12px;
+    padding: 10px;
+    resize: vertical;
+    outline: none;
+  }
+
+  .copy-btn {
+    margin-top: 8px;
+    width: auto;
+    font-size: 11px;
+    padding: 6px 12px;
+  }
+
+  .copy-btn.copied {
+    color: #6fae7c;
+    border-color: #6fae7c;
+  }
+
+  .name-input {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 13px;
+    padding: 10px 12px;
+    outline: none;
+    margin-bottom: 10px;
+  }
+
+  .name-input:focus {
+    border-color: var(--amber-dim);
+  }
+
   .empty {
     color: var(--muted);
     font-size: 12px;
@@ -377,6 +501,7 @@ FORM_HTML = """<!DOCTYPE html>
   <div class="panel">
     <div class="label">02 / text</div>
     <form method="POST" enctype="multipart/form-data" action="/">
+      <input class="name-input" type="text" name="textname" placeholder="name (optional, e.g. notes)" maxlength="120">
       <textarea name="text" rows="5" placeholder="paste text..."></textarea>
       <button type="submit">send text</button>
     </form>
@@ -503,10 +628,67 @@ __FILE_LIST__
       setTimeout(() => window.location.reload(), 400);
     });
   });
+
+  document.querySelectorAll('[data-toggle-target]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const target = document.getElementById(btn.dataset.toggleTarget);
+      if (!target) return;
+      const open = target.classList.toggle('open');
+      btn.textContent = open ? 'hide' : 'preview';
+    });
+  });
+
+  document.querySelectorAll('[data-copy-target]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const wrap = document.getElementById(btn.dataset.copyTarget);
+      if (!wrap) return;
+      const area = wrap.querySelector('.preview-area');
+      const text = area ? area.value : '';
+
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          area.removeAttribute('readonly');
+          area.select();
+          document.execCommand('copy');
+          area.setAttribute('readonly', 'true');
+        }
+        const original = btn.textContent;
+        btn.textContent = 'copied!';
+        btn.classList.add('copied');
+        setTimeout(() => {
+          btn.textContent = original;
+          btn.classList.remove('copied');
+        }, 1500);
+      } catch (err) {
+        btn.textContent = 'copy failed';
+        setTimeout(() => { btn.textContent = 'copy to clipboard'; }, 1500);
+      }
+    });
+  });
 </script>
 </body>
 </html>
 """
+
+
+def sanitize_text_name(raw_name):
+    """Turns user-provided text into a safe .txt filename fragment."""
+    raw_name = os.path.basename((raw_name or "").strip())
+    if not raw_name:
+        return "text.txt"
+
+    # drop any extension the user typed, we always force .txt
+    stem, _ = os.path.splitext(raw_name)
+    stem = stem.strip() or "text"
+
+    # keep it filesystem-friendly: letters, digits, space, dash, underscore, dot
+    safe_stem = "".join(c if (c.isalnum() or c in " -_.") else "_" for c in stem)
+    safe_stem = safe_stem.strip(" ._") or "text"
+    safe_stem = safe_stem.replace(" ", "_")
+
+    return f"{safe_stem}.txt"
 
 
 def human_size(num_bytes):
@@ -517,7 +699,11 @@ def human_size(num_bytes):
     return f"{num_bytes:.1f} TB"
 
 
+PREVIEW_MAX_CHARS = 200_000  # cap how much text gets embedded in the page
+
+
 def render_file_list():
+    ensure_upload_dir()
     entries = []
     for name in os.listdir(UPLOAD_DIR):
         full = os.path.join(UPLOAD_DIR, name)
@@ -530,16 +716,48 @@ def render_file_list():
     entries.sort(reverse=True)  # newest first
 
     rows = []
-    for _, name, size in entries:
+    for i, (_, name, size) in enumerate(entries):
         safe_name = html.escape(name)
         url_name = urllib.parse.quote(name)
+        full = os.path.join(UPLOAD_DIR, name)
+        is_txt = name.lower().endswith(".txt")
+
+        preview_html = ""
+        if is_txt:
+            preview_id = f"preview-{i}"
+            try:
+                with open(full, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read(PREVIEW_MAX_CHARS + 1)
+                truncated = len(content) > PREVIEW_MAX_CHARS
+                if truncated:
+                    content = content[:PREVIEW_MAX_CHARS] + "\n... (truncated)"
+            except OSError:
+                content = ""
+
+            safe_content = html.escape(content)
+            preview_html = (
+                f'<div class="preview-wrap open" id="{preview_id}">'
+                f'<textarea class="preview-area" readonly>{safe_content}</textarea>'
+                f'<button type="button" class="preview-btn copy-btn" data-copy-target="{preview_id}">copy to clipboard</button>'
+                f'</div>'
+            )
+
+        preview_btn = (
+            f'<button type="button" class="preview-btn" data-toggle-target="preview-{i}">hide</button>'
+            if is_txt else ""
+        )
+
         rows.append(
-            f'      <li>'
+            f'      <li class="file-row">'
+            f'<div class="file-top">'
             f'<span class="fname" title="{safe_name}">{safe_name}</span>'
             f'<span class="fmeta">'
             f'<span class="filesize">{human_size(size)}</span>'
+            f'{preview_btn}'
             f'<a class="dl-btn" href="/download/{url_name}" download>download</a>'
             f'</span>'
+            f'</div>'
+            f'{preview_html}'
             f'</li>'
         )
     return "\n".join(rows)
@@ -556,6 +774,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(page.encode("utf-8"))
 
     def _send_download(self, filename):
+        ensure_upload_dir()
         # protection against directory traversal (e.g. ../../etc/passwd)
         safe_name = os.path.basename(urllib.parse.unquote(filename))
         full_path = os.path.join(UPLOAD_DIR, safe_name)
@@ -601,6 +820,8 @@ class Handler(BaseHTTPRequestHandler):
             environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": ctype},
         )
 
+        ensure_upload_dir()
+
         message = ""
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -614,7 +835,9 @@ class Handler(BaseHTTPRequestHandler):
 
         elif "text" in form and form["text"].value.strip():
             text_value = form["text"].value
-            save_path = os.path.join(UPLOAD_DIR, f"{timestamp}_text.txt")
+            raw_name = form["textname"].value if "textname" in form else ""
+            filename = sanitize_text_name(raw_name)
+            save_path = os.path.join(UPLOAD_DIR, f"{timestamp}_{filename}")
             with open(save_path, "w", encoding="utf-8") as f:
                 f.write(text_value)
             message = f"Text saved as: {save_path}"
