@@ -1,5 +1,5 @@
-# TextShare
-A simple script that enables to share text data between devices in the same network.
+# File Share
+A simple script that enables to share files between devices in the same network.
 
 You must also install:
 
