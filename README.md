@@ -12,5 +12,5 @@ pip install tkinterdnd2
 ```
 
 <img width="1920" height="1020" alt="image" src="https://github.com/user-attachments/assets/cea2ce51-3ed3-432c-a16a-fe497ec792c3" />
-
+<br><br><br>
 <img width="1920" height="1020" alt="image" src="https://github.com/user-attachments/assets/6f15a1d1-bbcf-48b6-9c92-36d88d15c862" />
