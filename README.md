@@ -1,6 +1,6 @@
 # File Server
 A simple script that enables to share files between devices in the same network.<br>
-Program can also give an option to sent only text and on the file list there is a preview of this text in txt file.
+Program also gives an option to send only text and there is a preview of this text from sent txt file on the file list.
 <br><br>
 `file_server.py` is the actual python script, <br>
 `Text-To-Web_Local.py` is an old version of the program.
