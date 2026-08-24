@@ -87,21 +87,40 @@ def read_password_file():
         return None
 
 
-def ensure_self_signed_cert():
+def cert_has_san_for_ip(ip):
+    """Checks whether the existing certificate already has a SAN entry
+    for the given IP, so we know whether it needs regenerating (e.g. the
+    machine got a new LAN IP since the cert was created)."""
+    try:
+        result = subprocess.run(
+            ["openssl", "x509", "-in", CERT_FILE, "-noout", "-text"],
+            check=True, capture_output=True, text=True,
+        )
+        return f"IP Address:{ip}" in result.stdout
+    except (OSError, subprocess.CalledProcessError):
+        return False
+
+
+def ensure_self_signed_cert(ip):
     """Makes sure a self-signed certificate/key pair exists next to this
-    script, generating one with the local `openssl` binary if missing.
-    Returns True if a usable cert/key pair is available, False otherwise
-    (e.g. openssl isn't installed)."""
-    if os.path.isfile(CERT_FILE) and os.path.isfile(KEY_FILE):
+    script and covers the given IP via a Subject Alternative Name entry
+    (required by modern browsers - a CN-only cert gets the connection
+    dropped outright instead of showing a click-through warning when
+    accessed by IP). Generates/regenerates the pair with the local
+    `openssl` binary as needed. Returns True if a usable cert/key pair
+    is available, False otherwise (e.g. openssl isn't installed)."""
+    if os.path.isfile(CERT_FILE) and os.path.isfile(KEY_FILE) and cert_has_san_for_ip(ip):
         return True
 
     try:
+        san = f"subjectAltName=DNS:localhost,IP:127.0.0.1,IP:{ip}"
         subprocess.run(
             [
                 "openssl", "req", "-x509", "-newkey", "rsa:2048",
                 "-keyout", KEY_FILE, "-out", CERT_FILE,
                 "-days", "365", "-nodes",
                 "-subj", "/CN=localhost",
+                "-addext", san,
             ],
             check=True,
             stdout=subprocess.DEVNULL,
@@ -114,6 +133,52 @@ def ensure_self_signed_cert():
         return True
     except (OSError, subprocess.CalledProcessError):
         return False
+
+
+def find_firefox_binary():
+    """Looks for the Firefox executable: first on PATH, then in the
+    typical install locations per OS. Returns a path/command, or None
+    if Firefox couldn't be located."""
+    import shutil
+
+    for name in ("firefox", "firefox.exe", "firefox-esr"):
+        found = shutil.which(name)
+        if found:
+            return found
+
+    candidates = []
+    if sys.platform == "win32":
+        for env_var in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+            base = os.environ.get(env_var)
+            if base:
+                candidates.append(os.path.join(base, "Mozilla Firefox", "firefox.exe"))
+    elif sys.platform == "darwin":
+        candidates.append("/Applications/Firefox.app/Contents/MacOS/firefox")
+        candidates.append(os.path.expanduser("~/Applications/Firefox.app/Contents/MacOS/firefox"))
+    else:
+        candidates += ["/usr/bin/firefox", "/usr/local/bin/firefox", "/snap/bin/firefox"]
+
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+
+    return None
+
+
+def open_in_firefox(url):
+    """Opens the given URL in Firefox specifically. Falls back to the
+    system's default browser if Firefox can't be located."""
+    binary = find_firefox_binary()
+    if not binary:
+        print("Firefox not found - opening in the default browser instead.")
+        webbrowser.open_new_tab(url)
+        return
+
+    try:
+        subprocess.Popen([binary, url])
+    except OSError as e:
+        print(f"Could not launch Firefox ({e}) - opening in the default browser instead.")
+        webbrowser.open_new_tab(url)
 
 
 def ensure_upload_dir():
@@ -352,6 +417,31 @@ FORM_HTML = """<!DOCTYPE html>
     background: #c05656;
   }
 
+  .stop-btn {
+    display: none;
+    margin-top: 10px;
+    width: 100%;
+    background: transparent;
+    border: 1px solid #6b2b2b;
+    color: #c05656;
+  }
+
+  .stop-btn:hover {
+    background: rgba(192, 86, 86, 0.12);
+    border-color: #c05656;
+  }
+
+  .stop-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+    background: transparent;
+    border-color: #6b2b2b;
+  }
+
+  .progress-wrap.active + .stop-btn {
+    display: block;
+  }
+
   textarea {
     width: 100%;
     background: var(--bg);
@@ -578,6 +668,7 @@ FORM_HTML = """<!DOCTYPE html>
       </label>
       <button type="submit" id="fileSubmit">send file</button>
       <div class="progress-wrap" id="progressWrap"></div>
+      <button type="button" class="stop-btn" id="stopBtn">stop</button>
     </form>
   </div>
 
@@ -611,6 +702,9 @@ __FILE_LIST__
   const fileForm = document.getElementById('fileForm');
   const fileSubmit = document.getElementById('fileSubmit');
   const progressWrap = document.getElementById('progressWrap');
+  const stopBtn = document.getElementById('stopBtn');
+  let currentXhr = null;
+  let cancelled = false;
 
   function describeSelection(files) {
     if (!files.length) return '';
@@ -665,6 +759,7 @@ __FILE_LIST__
       const fill = row.querySelector('.progress-fill');
 
       const xhr = new XMLHttpRequest();
+      currentXhr = xhr;
       xhr.open('POST', '/', true);
 
       xhr.upload.addEventListener('progress', e => {
@@ -688,6 +783,12 @@ __FILE_LIST__
         reject(new Error('upload failed'));
       });
 
+      xhr.addEventListener('abort', () => {
+        fill.classList.add('error');
+        pct.textContent = 'stopped';
+        reject(new Error('aborted'));
+      });
+
       const fd = new FormData();
       fd.append('file', file);
       xhr.send(fd);
@@ -703,13 +804,31 @@ __FILE_LIST__
     fileSubmit.textContent = 'sending...';
     progressWrap.innerHTML = '';
     progressWrap.classList.add('active');
+    cancelled = false;
+    currentXhr = null;
+    stopBtn.disabled = false;
+    stopBtn.textContent = 'stop';
 
     // upload sequentially so each bar fills in order
     files.reduce((chain, file) => {
-      return chain.then(() => uploadOne(file).catch(() => {}));
+      return chain.then(() => {
+        if (cancelled) return;
+        return uploadOne(file).catch(() => {});
+      });
     }, Promise.resolve()).then(() => {
-      setTimeout(() => window.location.reload(), 400);
+      currentXhr = null;
+      progressWrap.classList.remove('active');
+      setTimeout(() => window.location.reload(), cancelled ? 700 : 400);
     });
+  });
+
+  stopBtn.addEventListener('click', () => {
+    cancelled = true;
+    stopBtn.disabled = true;
+    stopBtn.textContent = 'stopping...';
+    if (currentXhr) {
+      currentXhr.abort();
+    }
   });
 
   document.querySelectorAll('[data-toggle-target]').forEach(btn => {
@@ -844,6 +963,34 @@ def render_file_list():
             f'</li>'
         )
     return "\n".join(rows)
+
+
+class ThreadingHTTPSServer(ThreadingHTTPServer):
+    """Like ThreadingHTTPServer, but wraps each *accepted* connection in
+    TLS individually (instead of wrapping the listening socket) so that
+    a failed handshake can be logged and the socket closed cleanly,
+    rather than being silently swallowed by socketserver (ssl.SSLError
+    is a subclass of OSError, which socketserver's default request loop
+    ignores without printing anything)."""
+
+    def __init__(self, *args, ssl_context=None, **kwargs):
+        self.ssl_context = ssl_context
+        super().__init__(*args, **kwargs)
+
+    def get_request(self):
+        newsocket, fromaddr = super().get_request()
+        if self.ssl_context is None:
+            return newsocket, fromaddr
+        try:
+            newsocket = self.ssl_context.wrap_socket(newsocket, server_side=True)
+        except ssl.SSLError as e:
+            print(f"TLS handshake failed with {fromaddr}: {e}")
+            try:
+                newsocket.close()
+            except OSError:
+                pass
+            raise
+        return newsocket, fromaddr
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -984,20 +1131,22 @@ if __name__ == "__main__":
         AUTH_PASSWORD = secrets.token_urlsafe(9)
         generated = True
 
-    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    active_ip = get_active_ip()
 
     use_https = os.environ.get("FILE_SERVER_NO_HTTPS", "") not in ("1", "true", "yes")
+    ssl_context = None
     if use_https:
-        if ensure_self_signed_cert():
-            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            ctx.load_cert_chain(certfile=CERT_FILE, keyfile=KEY_FILE)
-            server.socket = ctx.wrap_socket(server.socket, server_side=True)
+        if ensure_self_signed_cert(active_ip):
+            ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ssl_context.load_cert_chain(certfile=CERT_FILE, keyfile=KEY_FILE)
         else:
             print("Warning: 'openssl' not found or cert generation failed - falling back to plain HTTP.")
             use_https = False
 
+    server = ThreadingHTTPSServer(("0.0.0.0", port), Handler, ssl_context=ssl_context)
+
     scheme = "https" if use_https else "http"
-    url = f"{scheme}://{get_active_ip()}:{port}"
+    url = f"{scheme}://{active_ip}:{port}"
 
     print(f"Server running on port {port}. Files land in the '{UPLOAD_DIR}/' folder.")
     print(f"On the local network, access it via: {url}")
@@ -1009,7 +1158,7 @@ if __name__ == "__main__":
         print(f"Login required - password (auto-generated): {AUTH_PASSWORD}")
     else:
         print(f"Login required - password: (loaded from {source})")
-    webbrowser.open_new_tab(url)
+    open_in_firefox(url)
     try:
         server.serve_forever()
 
