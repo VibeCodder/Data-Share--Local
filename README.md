@@ -34,8 +34,11 @@ The server requires HTTP Basic Auth. The password is resolved in the following o
    If none of the above is set, the server generates a random password at startup and prints it to the console.
 
 > **Note:** The username is fixed as `admin`. If you use the password file, make sure to add it to `.gitignore` and restrict its file permissions, since it's stored in plain text.
-<br><br>
+> 
+<br>
 You can also run the app without https using this command:
+<br><br>
+
 ```
 $env:FILE_SERVER_NO_HTTPS="1"; python file_server.py
 ```
