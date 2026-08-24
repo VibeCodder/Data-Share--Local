@@ -4,6 +4,34 @@ Simple server for receiving files and text through the browser.
 Run: python3 file_server.py [port]
 Default port: 8000
 Files and pasted text land in the ./uploads folder
+
+HTTPS:
+  The server serves HTTPS by default. On first run it auto-generates a
+  self-signed certificate (via the local `openssl` binary) and stores it
+  next to this script as server.crt / server.key, then reuses it on later
+  runs. Because the certificate is self-signed, browsers will show a
+  security warning on first visit - this is expected; you need to accept
+  the exception to continue. Encrypting the connection (including the
+  Basic Auth password) is still a big improvement over plain HTTP on a
+  local network.
+  To disable HTTPS and serve plain HTTP instead, set:
+      FILE_SERVER_NO_HTTPS=1 python3 file_server.py
+
+Password protection:
+  The password is resolved in this order:
+    1. FILE_SERVER_PASSWORD environment variable
+    2. Second command-line argument:
+         python3 file_server.py 8000 my-secret-password
+    3. A password file next to this script (see PASSWORD_FILE below),
+       containing nothing but the password (a single trailing newline is fine)
+    4. If none of the above is set, a random password is generated at
+       startup and printed to the console.
+  Username is fixed as "admin" (change AUTH_USER below if you want another one).
+
+  Note on storing the password in a file: for local-network use this is
+  fine, but keep the file out of version control (add it to .gitignore)
+  and restrict its permissions (e.g. chmod 600) since it is stored in
+  plain text.
 """
 
 import os,socket,webbrowser
@@ -13,6 +41,11 @@ import html
 import mimetypes
 import datetime
 import urllib.parse
+import base64
+import hmac
+import secrets
+import ssl
+import subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
@@ -31,6 +64,56 @@ def get_active_ip():
     return ip
 
 UPLOAD_DIR = "uploads"
+
+AUTH_USER = "admin"
+AUTH_REALM = "transfer://local"
+
+# Optional password file, read next to this script if no env var / CLI
+# argument is given. Contains nothing but the password.
+PASSWORD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".file_server_password")
+
+# Self-signed TLS cert/key, auto-generated next to this script on first run.
+CERT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "server.crt")
+KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "server.key")
+
+
+def read_password_file():
+    """Reads the password from PASSWORD_FILE, if it exists. Returns None otherwise."""
+    try:
+        with open(PASSWORD_FILE, "r", encoding="utf-8") as f:
+            pwd = f.read().strip()
+        return pwd or None
+    except OSError:
+        return None
+
+
+def ensure_self_signed_cert():
+    """Makes sure a self-signed certificate/key pair exists next to this
+    script, generating one with the local `openssl` binary if missing.
+    Returns True if a usable cert/key pair is available, False otherwise
+    (e.g. openssl isn't installed)."""
+    if os.path.isfile(CERT_FILE) and os.path.isfile(KEY_FILE):
+        return True
+
+    try:
+        subprocess.run(
+            [
+                "openssl", "req", "-x509", "-newkey", "rsa:2048",
+                "-keyout", KEY_FILE, "-out", CERT_FILE,
+                "-days", "365", "-nodes",
+                "-subj", "/CN=localhost",
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            os.chmod(KEY_FILE, 0o600)
+        except OSError:
+            pass
+        return True
+    except (OSError, subprocess.CalledProcessError):
+        return False
 
 
 def ensure_upload_dir():
@@ -764,6 +847,29 @@ def render_file_list():
 
 
 class Handler(BaseHTTPRequestHandler):
+    def _require_auth(self):
+        """Checks HTTP Basic Auth. Returns True if the request is authorized.
+        If not, sends a 401 response prompting for credentials."""
+        auth_header = self.headers.get("Authorization", "")
+        if auth_header.startswith("Basic "):
+            try:
+                decoded = base64.b64decode(auth_header[len("Basic "):]).decode("utf-8")
+                user, _, pwd = decoded.partition(":")
+            except Exception:
+                user, pwd = "", ""
+
+            user_ok = hmac.compare_digest(user, AUTH_USER)
+            pwd_ok = hmac.compare_digest(pwd, AUTH_PASSWORD)
+            if user_ok and pwd_ok:
+                return True
+
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", f'Basic realm="{AUTH_REALM}"')
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write("Authorization required.".encode("utf-8"))
+        return False
+
     def _send_html(self, message=""):
         page = FORM_HTML.replace("__MESSAGE__", message or "ready")
         page = page.replace("__MSG_DISPLAY__", "block" if message else "none")
@@ -802,6 +908,8 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(f.read())
 
     def do_GET(self):
+        if not self._require_auth():
+            return
         if self.path.startswith("/download/"):
             filename = self.path[len("/download/"):]
             self._send_download(filename)
@@ -809,6 +917,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_html()
 
     def do_POST(self):
+        if not self._require_auth():
+            return
         ctype = self.headers.get("Content-Type", "")
         if not ctype.startswith("multipart/form-data"):
             self._send_html("Error: invalid data.")
@@ -854,13 +964,55 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
+
+    # Password: env var > CLI arg > password file > randomly generated
+    AUTH_PASSWORD = os.environ.get("FILE_SERVER_PASSWORD")
+    source = "env var" if AUTH_PASSWORD else None
+
+    if not AUTH_PASSWORD and len(sys.argv) > 2:
+        AUTH_PASSWORD = sys.argv[2]
+        source = "CLI argument"
+
+    if not AUTH_PASSWORD:
+        from_file = read_password_file()
+        if from_file:
+            AUTH_PASSWORD = from_file
+            source = f"file ({PASSWORD_FILE})"
+
+    generated = False
+    if not AUTH_PASSWORD:
+        AUTH_PASSWORD = secrets.token_urlsafe(9)
+        generated = True
+
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+
+    use_https = os.environ.get("FILE_SERVER_NO_HTTPS", "") not in ("1", "true", "yes")
+    if use_https:
+        if ensure_self_signed_cert():
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(certfile=CERT_FILE, keyfile=KEY_FILE)
+            server.socket = ctx.wrap_socket(server.socket, server_side=True)
+        else:
+            print("Warning: 'openssl' not found or cert generation failed - falling back to plain HTTP.")
+            use_https = False
+
+    scheme = "https" if use_https else "http"
+    url = f"{scheme}://{get_active_ip()}:{port}"
+
     print(f"Server running on port {port}. Files land in the '{UPLOAD_DIR}/' folder.")
-    print(f"On the local network, access it via: http://{get_active_ip()}:{port}")
-    webbrowser.open_new_tab(f"http://{get_active_ip()}:{port}")
+    print(f"On the local network, access it via: {url}")
+    if use_https:
+        print("Using a self-signed certificate - your browser will warn about it on")
+        print("first visit ('not private' / 'not secure'). Accept the exception to continue.")
+    print(f"Login required - username: {AUTH_USER}")
+    if generated:
+        print(f"Login required - password (auto-generated): {AUTH_PASSWORD}")
+    else:
+        print(f"Login required - password: (loaded from {source})")
+    webbrowser.open_new_tab(url)
     try:
         server.serve_forever()
-        
+
     except KeyboardInterrupt:
         print("\nStopping server.")
         server.server_close()
