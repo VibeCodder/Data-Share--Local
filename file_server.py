@@ -121,6 +121,9 @@ def ensure_self_signed_cert(ip):
                 "-days", "365", "-nodes",
                 "-subj", "/CN=localhost",
                 "-addext", san,
+                "-addext", "keyUsage=critical,digitalSignature,keyEncipherment",
+                "-addext", "extendedKeyUsage=serverAuth",
+                "-addext", "basicConstraints=critical,CA:FALSE",
             ],
             check=True,
             stdout=subprocess.DEVNULL,
@@ -411,6 +414,13 @@ FORM_HTML = """<!DOCTYPE html>
 
   .progress-fill.done {
     background: #6fae7c;
+  }
+
+  .progress-size {
+    margin-top: 4px;
+    font-size: 10px;
+    color: var(--muted);
+    text-align: right;
   }
 
   .progress-fill.error {
@@ -706,6 +716,18 @@ __FILE_LIST__
   let currentXhr = null;
   let cancelled = false;
 
+  function formatBytes(bytes) {
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let n = bytes;
+    let i = 0;
+    while (n >= 1024 && i < units.length - 1) {
+      n /= 1024;
+      i++;
+    }
+    const decimals = (i === 0) ? 0 : 1;
+    return `${n.toFixed(decimals)} ${units[i]}`;
+  }
+
   function describeSelection(files) {
     if (!files.length) return '';
     if (files.length === 1) return files[0].name;
@@ -751,12 +773,15 @@ __FILE_LIST__
           <span class="ppct">0%</span>
         </div>
         <div class="progress-track"><div class="progress-fill"></div></div>
+        <div class="progress-size"></div>
       `;
       row.querySelector('.pname').textContent = file.name;
       progressWrap.appendChild(row);
 
       const pct = row.querySelector('.ppct');
       const fill = row.querySelector('.progress-fill');
+      const sizeText = row.querySelector('.progress-size');
+      sizeText.textContent = `0 B / ${formatBytes(file.size)}`;
 
       const xhr = new XMLHttpRequest();
       currentXhr = xhr;
@@ -767,6 +792,9 @@ __FILE_LIST__
           const p = Math.round((e.loaded / e.total) * 100);
           fill.style.width = p + '%';
           pct.textContent = p + '%';
+          const remaining = e.total - e.loaded;
+          sizeText.textContent =
+            `${formatBytes(e.loaded)} / ${formatBytes(e.total)} \u00b7 ${formatBytes(remaining)} left`;
         }
       });
 
@@ -774,6 +802,7 @@ __FILE_LIST__
         fill.style.width = '100%';
         fill.classList.add('done');
         pct.textContent = 'done';
+        sizeText.textContent = `${formatBytes(file.size)} / ${formatBytes(file.size)}`;
         resolve();
       });
 
